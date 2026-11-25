@@ -1,3 +1,4 @@
+import os
 import gradio as gr
 import chess
 from engine.search import DeepRedSearch
@@ -469,4 +470,5 @@ with gr.Blocks(title="DeepRed — Classical AI Chess Engine", css=CUSTOM_CSS, js
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    puerto = int(os.environ.get("PORT", 7860))
+    demo.launch(server_name="0.0.0.0", server_port=puerto)

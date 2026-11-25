@@ -181,11 +181,13 @@ class ChessGUI:
 
     def _turno_motor_async(self):
         self.motor_pensando = True
-        jugada = self.motor.buscar_mejor_jugada(self.board)
-        if jugada and not self.board.is_game_over():
-            self.board.push(jugada)
-            self.ultima_jugada = jugada
-        self.motor_pensando = False
+        try:
+            jugada = self.motor.buscar_mejor_jugada(self.board, visualizar_en_vivo=True)
+            if jugada and not self.board.is_game_over():
+                self.board.push(jugada)
+                self.ultima_jugada = jugada
+        finally:
+            self.motor_pensando = False
 
     def _manejar_clic(self, pos_raton):
         if self.motor_pensando or self.board.is_game_over() or self.board.turn != chess.WHITE:

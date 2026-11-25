@@ -1,200 +1,171 @@
 import time
+import random
 import chess
-import chess.polyglot
-from .evaluation import evaluar_tablero, VALORES_PIEZAS
+from engine.evaluation import evaluar_tablero, VALORES_PIEZAS
 
-EXACTO = 0
-COTA_INFERIOR = 1
-COTA_SUPERIOR = 2
+
+class TiempoAgotado(Exception):
+    pass
 
 
 class DeepRedSearch:
-    def __init__(self, tiempo_maximo: float = 2.5, profundidad_max: int = 6):
+    def __init__(self, tiempo_maximo: float = 1.5, profundidad_max: int = 4):
         self.tiempo_maximo = tiempo_maximo
         self.profundidad_max = profundidad_max
+        self.inicio = 0.0
         self.nodos_evaluados = 0
         self.aciertos_tt = 0
-        self.tabla_transposicion = {}
-        self.ultima_evaluacion = 0
         self.profundidad_alcanzada = 0
+        self.ultima_evaluacion = 0
+        self.tt = {}
 
-    def _puntuar_jugada(self, board: chess.Board, jugada: chess.Move) -> int:
-        puntuacion = 0
-        if board.is_capture(jugada):
-            atacante = board.piece_at(jugada.from_square)
-            victima = board.piece_at(jugada.to_square)
-            val_atacante = VALORES_PIEZAS[atacante.piece_type] if atacante else 0
-            val_victima = VALORES_PIEZAS[victima.piece_type] if victima else VALORES_PIEZAS[chess.PAWN]
-            puntuacion += 10 * val_victima - val_atacante
+        random.seed(42)
+        self.z_piezas = {
+            (p, c, s): random.getrandbits(64)
+            for p in range(1, 7)
+            for c in (True, False)
+            for s in range(64)
+        }
+        self.z_turno = random.getrandbits(64)
 
-        if jugada.promotion:
-            puntuacion += VALORES_PIEZAS[jugada.promotion]
+    def _hash(self, board: chess.Board) -> int:
+        h = self.z_turno if board.turn == chess.BLACK else 0
+        for sq, p in board.piece_map().items():
+            h ^= self.z_piezas[(p.piece_type, p.color, sq)]
+        return h
 
-        return puntuacion
+    def _ordenar(self, board: chess.Board, jugadas, mejor_tt=None):
+        def peso(m):
+            if mejor_tt and m == mejor_tt:
+                return 100000
+            if board.is_capture(m):
+                v = board.piece_at(m.to_square)
+                a = board.piece_at(m.from_square)
+                return (
+                    10000
+                    + (VALORES_PIEZAS[v.piece_type] * 10 if v else 100)
+                    - (VALORES_PIEZAS[a.piece_type] if a else 0)
+                )
+            return 0
 
-    def _obtener_jugadas_ordenadas(self, board: chess.Board):
-        return sorted(board.legal_moves, key=lambda j: self._puntuar_jugada(board, j), reverse=True)
+        return sorted(jugadas, key=peso, reverse=True)
 
-    def _obtener_capturas_ordenadas(self, board: chess.Board):
-        capturas = [j for j in board.legal_moves if board.is_capture(j)]
-        return sorted(capturas, key=lambda j: self._puntuar_jugada(board, j), reverse=True)
-
-    def _quiescence(self, board: chess.Board, alfa: float, beta: float, es_maximizador: bool) -> float:
+    def _quiescence(self, board: chess.Board, alfa: int, beta: int, maximizando: bool, q_depth: int = 0) -> int:
         self.nodos_evaluados += 1
-        stand_pat = evaluar_tablero(board)
+        if self.nodos_evaluados % 512 == 0 and (time.perf_counter() - self.inicio) > self.tiempo_maximo:
+            raise TiempoAgotado()
 
-        if es_maximizador:
+        stand_pat = evaluar_tablero(board)
+        if q_depth >= 6:
+            return stand_pat
+
+        if maximizando:
             if stand_pat >= beta:
                 return beta
-            if alfa < stand_pat:
-                alfa = stand_pat
-
-            for jugada in self._obtener_capturas_ordenadas(board):
-                board.push(jugada)
-                valor = self._quiescence(board, alfa, beta, False)
-                board.pop()
-                if valor >= beta:
-                    return beta
-                if valor > alfa:
-                    alfa = valor
+            alfa = max(alfa, stand_pat)
+            for m in self._ordenar(board, [x for x in board.legal_moves if board.is_capture(x)]):
+                board.push(m)
+                try:
+                    sc = self._quiescence(board, alfa, beta, False, q_depth + 1)
+                finally:
+                    board.pop()
+                alfa = max(alfa, sc)
+                if alfa >= beta:
+                    break
             return alfa
         else:
             if stand_pat <= alfa:
                 return alfa
-            if beta > stand_pat:
-                beta = stand_pat
-
-            for jugada in self._obtener_capturas_ordenadas(board):
-                board.push(jugada)
-                valor = self._quiescence(board, alfa, beta, True)
-                board.pop()
-                if valor <= alfa:
-                    return alfa
-                if valor < beta:
-                    beta = valor
+            beta = min(beta, stand_pat)
+            for m in self._ordenar(board, [x for x in board.legal_moves if board.is_capture(x)]):
+                board.push(m)
+                try:
+                    sc = self._quiescence(board, alfa, beta, True, q_depth + 1)
+                finally:
+                    board.pop()
+                beta = min(beta, sc)
+                if beta <= alfa:
+                    break
             return beta
 
-    def _minimax_tt(self, board: chess.Board, profundidad: int, alfa: float, beta: float, es_maximizador: bool) -> float:
-        alfa_original = alfa
-        beta_original = beta
-        hash_pos = chess.polyglot.zobrist_hash(board)
+    def _alfabeta(self, board: chess.Board, prof: int, alfa: int, beta: int, maximizando: bool) -> int:
+        self.nodos_evaluados += 1
+        if self.nodos_evaluados % 512 == 0 and (time.perf_counter() - self.inicio) > self.tiempo_maximo:
+            raise TiempoAgotado()
 
-        entrada = self.tabla_transposicion.get(hash_pos)
-        if entrada is not None and entrada["profundidad"] >= profundidad:
+        h = self._hash(board)
+        entrada = self.tt.get(h)
+        mejor_tt = entrada[2] if entrada else None
+        if entrada and entrada[0] >= prof:
             self.aciertos_tt += 1
-            val_guardado = entrada["valor"]
-            bandera = entrada["bandera"]
-
-            if bandera == EXACTO:
-                return val_guardado
-            elif bandera == COTA_INFERIOR:
-                alfa = max(alfa, val_guardado)
-            elif bandera == COTA_SUPERIOR:
-                beta = min(beta, val_guardado)
-
-            if alfa >= beta:
-                return val_guardado
+            return entrada[1]
 
         if board.is_game_over():
-            self.nodos_evaluados += 1
             return evaluar_tablero(board)
+        if prof <= 0:
+            return self._quiescence(board, alfa, beta, maximizando, 0)
 
-        if profundidad == 0:
-            return self._quiescence(board, alfa, beta, es_maximizador)
+        jugadas = self._ordenar(board, list(board.legal_moves), mejor_tt)
+        mejor_mov = jugadas[0]
 
-        self.nodos_evaluados += 1
-        jugadas = self._obtener_jugadas_ordenadas(board)
-
-        if es_maximizador:
-            mejor_valor = -float('inf')
-            for jugada in jugadas:
-                board.push(jugada)
-                valor = self._minimax_tt(board, profundidad - 1, alfa, beta, False)
-                board.pop()
-                mejor_valor = max(mejor_valor, valor)
-                alfa = max(alfa, mejor_valor)
+        if maximizando:
+            val = -10**9
+            for m in jugadas:
+                board.push(m)
+                try:
+                    ev = self._alfabeta(board, prof - 1, alfa, beta, False)
+                finally:
+                    board.pop()
+                if ev > val:
+                    val, mejor_mov = ev, m
+                alfa = max(alfa, val)
                 if beta <= alfa:
                     break
         else:
-            mejor_valor = float('inf')
-            for jugada in jugadas:
-                board.push(jugada)
-                valor = self._minimax_tt(board, profundidad - 1, alfa, beta, True)
-                board.pop()
-                mejor_valor = min(mejor_valor, valor)
-                beta = min(beta, mejor_valor)
+            val = 10**9
+            for m in jugadas:
+                board.push(m)
+                try:
+                    ev = self._alfabeta(board, prof - 1, alfa, beta, True)
+                finally:
+                    board.pop()
+                if ev < val:
+                    val, mejor_mov = ev, m
+                beta = min(beta, val)
                 if beta <= alfa:
                     break
 
-        if mejor_valor <= alfa_original:
-            bandera = COTA_SUPERIOR
-        elif mejor_valor >= beta_original:
-            bandera = COTA_INFERIOR
-        else:
-            bandera = EXACTO
+        self.tt[h] = (prof, val, mejor_mov)
+        return val
 
-        self.tabla_transposicion[hash_pos] = {
-            "profundidad": profundidad,
-            "valor": mejor_valor,
-            "bandera": bandera
-        }
-        return mejor_valor
-
-    def buscar_mejor_jugada(self, board: chess.Board) -> chess.Move:
+    def buscar_mejor_jugada(self, board_original: chess.Board, visualizar_en_vivo: bool = False):
+        board = board_original if visualizar_en_vivo else board_original.copy()
+        self.inicio = time.perf_counter()
         self.nodos_evaluados = 0
         self.aciertos_tt = 0
-        self.tabla_transposicion.clear()
 
-        inicio = time.time()
-        es_blancas = (board.turn == chess.WHITE)
-        mejor_jugada_global = None
-        mejor_valor_global = 0
+        jugadas = list(board.legal_moves)
+        mejor_global = jugadas[0]
+        maximizando = board.turn == chess.WHITE
 
         for prof in range(1, self.profundidad_max + 1):
-            if (time.time() - inicio) > self.tiempo_maximo * 0.65 and mejor_jugada_global is not None:
+            try:
+                mejor_iter = mejor_global
+                mejor_val = -10**9 if maximizando else 10**9
+                for m in self._ordenar(board, jugadas, mejor_global):
+                    board.push(m)
+                    try:
+                        val = self._alfabeta(board, prof - 1, -10**9, 10**9, not maximizando)
+                    finally:
+                        board.pop()
+                    if (maximizando and val > mejor_val) or (not maximizando and val < mejor_val):
+                        mejor_val, mejor_iter = val, m
+                mejor_global = mejor_iter
+                self.ultima_evaluacion = mejor_val
+                self.profundidad_alcanzada = prof
+                if abs(mejor_val) >= 90000:
+                    break
+            except TiempoAgotado:
                 break
 
-            mejor_jugada_actual = None
-            mejor_valor_actual = -float('inf') if es_blancas else float('inf')
-            alfa = -float('inf')
-            beta = float('inf')
-
-            jugadas = self._obtener_jugadas_ordenadas(board)
-            if mejor_jugada_global in jugadas:
-                jugadas.remove(mejor_jugada_global)
-                jugadas.insert(0, mejor_jugada_global)
-
-            tiempo_agotado = False
-            for jugada in jugadas:
-                if (time.time() - inicio) > self.tiempo_maximo and mejor_jugada_global is not None:
-                    tiempo_agotado = True
-                    break
-
-                board.push(jugada)
-                valor = self._minimax_tt(board, prof - 1, alfa, beta, not es_blancas)
-                board.pop()
-
-                if es_blancas:
-                    if valor > mejor_valor_actual:
-                        mejor_valor_actual = valor
-                        mejor_jugada_actual = jugada
-                    alfa = max(alfa, mejor_valor_actual)
-                else:
-                    if valor < mejor_valor_actual:
-                        mejor_valor_actual = valor
-                        mejor_jugada_actual = jugada
-                    beta = min(beta, mejor_valor_actual)
-
-            if not tiempo_agotado and mejor_jugada_actual is not None:
-                mejor_jugada_global = mejor_jugada_actual
-                mejor_valor_global = mejor_valor_actual
-                self.profundidad_alcanzada = prof
-
-        self.ultima_evaluacion = mejor_valor_global
-        tiempo_total = time.time() - inicio
-        print(
-            f"[DeepRed] Prof: {self.profundidad_alcanzada} | Jugada: {mejor_jugada_global} | "
-            f"Eval: {self.ultima_evaluacion} | Nodos: {self.nodos_evaluados} | "
-            f"TT Hits: {self.aciertos_tt} | Tiempo: {tiempo_total:.2f}s"
-        )
-        return mejor_jugada_global
+        return mejor_global
