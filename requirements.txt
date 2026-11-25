@@ -1,3 +1,2 @@
 python-chess>=1.999
-gradio>=4.0.0
-pygame>=2.5.0
+gradio>=4.44.0
