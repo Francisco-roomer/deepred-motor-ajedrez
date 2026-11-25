@@ -75,6 +75,14 @@ class ChessGUI:
                 s.fill(COLOR_ULTIMA_JUGADA)
                 self.pantalla.blit(s, self._casilla_a_rect(sq).topleft)
 
+        # Resaltar casilla del Rey en rojo intenso si hay Jaque
+        if self.board.is_check():
+            rey_sq = self.board.king(self.board.turn)
+            if rey_sq is not None:
+                s = pygame.Surface((self.tam_casilla, self.tam_casilla), pygame.SRCALPHA)
+                s.fill((220, 20, 40, 210))
+                self.pantalla.blit(s, self._casilla_a_rect(rey_sq).topleft)
+
         # Resaltar casilla seleccionada
         if self.casilla_seleccionada is not None:
             s = pygame.Surface((self.tam_casilla, self.tam_casilla), pygame.SRCALPHA)
@@ -89,6 +97,10 @@ class ChessGUI:
             self.pantalla.blit(s, rect.topleft)
 
     def _dibujar_piezas(self):
+        en_jaque = self.board.is_check()
+        rey_sq = self.board.king(self.board.turn) if en_jaque else None
+        piezas_salvadoras = {m.from_square for m in self.board.legal_moves} if en_jaque else set()
+
         for casilla in chess.SQUARES:
             pieza = self.board.piece_at(casilla)
             if pieza:
@@ -98,10 +110,16 @@ class ChessGUI:
                 borde_color = (18, 20, 24) if pieza.color == chess.WHITE else (235, 235, 240)
 
                 texto_sombra = self.fuente_piezas.render(simbolo, True, borde_color)
+                texto = self.fuente_piezas.render(simbolo, True, color_pieza)
+
+                # Atenuar piezas que no pueden moverse durante un jaque
+                if en_jaque and casilla != rey_sq and casilla not in piezas_salvadoras:
+                    texto_sombra.set_alpha(80)
+                    texto.set_alpha(80)
+
                 rect_sombra = texto_sombra.get_rect(center=(rect.centerx + 1, rect.centery + 1))
                 self.pantalla.blit(texto_sombra, rect_sombra)
 
-                texto = self.fuente_piezas.render(simbolo, True, color_pieza)
                 rect_texto = texto.get_rect(center=rect.center)
                 self.pantalla.blit(texto, rect_texto)
 
@@ -129,16 +147,25 @@ class ChessGUI:
             border_radius=4
         )
 
-        # Telemetría en tiempo real
-        if self.board.is_game_over():
+        # Telemetría en tiempo real con alerta de Jaque / Jaque Mate
+        color_estado = COLOR_TEXTO
+        if self.board.is_checkmate():
+            estado = f"¡JAQUE MATE! ({self.board.result()})"
+            color_estado = COLOR_ACENTO_ROJO
+        elif self.board.is_game_over():
             estado = f"Fin: {self.board.result()}"
         elif self.motor_pensando:
             estado = "Calculando árbol..."
+        elif self.board.is_check():
+            estado = "¡JAQUE! Protege al Rey"
+            color_estado = COLOR_ACENTO_ROJO
         else:
             estado = "Tu turno (Blancas)"
 
+        surf_estado = self.fuente_ui.render(f"Estado: {estado}", True, color_estado)
+        self.pantalla.blit(surf_estado, (x_base, 138))
+
         metricas = [
-            f"Estado: {estado}",
             f"Eval f(s): {eval_cp / 100:+.2f}",
             f"Profundidad: {self.motor.profundidad_alcanzada}",
             f"Nodos: {self.motor.nodos_evaluados:,}",
@@ -147,7 +174,7 @@ class ChessGUI:
 
         for i, linea in enumerate(metricas):
             surf = self.fuente_ui.render(linea, True, COLOR_TEXTO)
-            self.pantalla.blit(surf, (x_base, 138 + i * 32))
+            self.pantalla.blit(surf, (x_base, 170 + i * 32))
 
         ayuda = self.fuente_sub.render("[R] Reiniciar partida", True, COLOR_TEXTO_SEC)
         self.pantalla.blit(ayuda, (x_base, self.alto_total - 40))
